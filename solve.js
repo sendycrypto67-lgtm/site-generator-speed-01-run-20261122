@@ -518,6 +518,65 @@ function inlineSlow(s, link) {
 }
 
 /**
+ * One list item's inline HTML from its line ranges in `il[s0..s1]`: a
+ * single line whose ends need no trimming renders straight from its
+ * range; otherwise its lines are trimmed and joined, as a paragraph is.
+ */
+function listItemHtml(src, il, s0, s1, link) {
+  if (s1 - s0 === 2 && !(il[s0] !== il[s0 + 1] && (src[il[s0]] === ' ' || src[il[s0]] === '\t' || src[il[s0 + 1] - 1] === ' ' || src[il[s0 + 1] - 1] === '\t'))) {
+    return inlineRange(src, il[s0], il[s0 + 1], link);
+  }
+  const strs = [];
+  for (let q = s0; q < s1; q += 2) {
+    let tx = il[q];
+    let ty = il[q + 1];
+    while (tx < ty && (src[tx] === ' ' || src[tx] === '\t')) tx++;
+    while (ty > tx && (src[ty - 1] === ' ' || src[ty - 1] === '\t')) ty--;
+    strs.push(src.slice(tx, ty));
+  }
+  return inlineStr(strs.join('\n'), link);
+}
+
+/**
+ * A list starting at line `a..b` of `src`: `isItem(p, e)` is an item
+ * line's text start or -1 (unordered: "- "/"* "; ordered: orderedRange).
+ * Returns its HTML and the position after its last line. The collection
+ * loop and the item rendering are the same for both list kinds.
+ */
+function listBlock(src, a, b, next, n, link, open, close, isItem) {
+  const il = [];
+  const ib = [];
+  let p = a;
+  let e = b;
+  let nx = next;
+  while (true) {
+    const t = isItem(p, e);
+    if (t !== -1) {
+      ib.push(il.length);
+      il.push(t, e);
+      p = nx;
+      if (p >= n) break;
+      const le = src.indexOf('\n', p);
+      e = le === -1 ? n : le;
+      nx = e === n ? n + 1 : e + 1;
+    } else if (isContinuedRange(src, p, e)) {
+      il.push(p, e);
+      p = nx;
+      if (p >= n) break;
+      const le = src.indexOf('\n', p);
+      e = le === -1 ? n : le;
+      nx = e === n ? n + 1 : e + 1;
+    } else break;
+  }
+  ib.push(il.length);
+  let out = open;
+  for (let k = 0; k + 1 < ib.length; k++) {
+    out += '<li>' + listItemHtml(src, il, ib[k], ib[k + 1], link) + '</li>\n';
+  }
+  return { html: out + close, pos: p };
+}
+
+/**
  * `src` rendered in one pass over its line ranges (no split): its HTML
  * (each block on its own lines, a "\n" after the last), its table of
  * contents (every level 2 and 3 heading: level, id and its inline HTML)
@@ -581,51 +640,9 @@ function renderMarkdown(src, link, slugOf) {
       }
       const t0 = (src[a] === '-' || src[a] === '*') && src[a + 1] === ' ' ? a + 2 : -1;
       if (t0 !== -1) {
-        const il = [];
-        const ib = [];
-        let p = a;
-        let e = b;
-        let nx = next;
-        while (true) {
-          const t = (src[p] === '-' || src[p] === '*') && src[p + 1] === ' ' ? p + 2 : -1;
-          if (t !== -1) {
-            ib.push(il.length);
-            il.push(t, e);
-            p = nx;
-            if (p >= n) break;
-            e = (_le = src.indexOf('\n', p)) === -1 ? n : _le;
-            nx = e === n ? n + 1 : e + 1;
-          } else if (isContinuedRange(src, p, e)) {
-            il.push(p, e);
-            p = nx;
-            if (p >= n) break;
-            e = (_le = src.indexOf('\n', p)) === -1 ? n : _le;
-            nx = e === n ? n + 1 : e + 1;
-          } else break;
-        }
-        ib.push(il.length);
-        parts.push('<ul>\n');
-        for (let k = 0; k + 1 < ib.length; k++) {
-          const s0 = ib[k];
-          const s1 = ib[k + 1];
-          let html;
-          if (s1 - s0 === 2 && !(il[s0] !== il[s0 + 1] && (src[il[s0]] === ' ' || src[il[s0]] === '\t' || src[il[s0 + 1] - 1] === ' ' || src[il[s0 + 1] - 1] === '\t'))) {
-            html = inlineRange(src, il[s0], il[s0 + 1], link);
-          } else {
-            const strs = [];
-            for (let q = s0; q < s1; q += 2) {
-              let tx = il[q];
-              let ty = il[q + 1];
-              while (tx < ty && (src[tx] === ' ' || src[tx] === '\t')) tx++;
-              while (ty > tx && (src[ty - 1] === ' ' || src[ty - 1] === '\t')) ty--;
-              strs.push(src.slice(tx, ty));
-            }
-            html = inlineStr(strs.join('\n'), link);
-          }
-          parts.push('<li>' + html + '</li>\n');
-        }
-        parts.push('</ul>\n');
-        pos = p;
+        const r = listBlock(src, a, b, next, n, link, '<ul>\n', '</ul>\n', (p, e) => (src[p] === '-' || src[p] === '*') && src[p + 1] === ' ' ? p + 2 : -1);
+        parts.push(r.html);
+        pos = r.pos;
         continue;
       }
     } else if (c0 === 62) {
@@ -654,51 +671,12 @@ function renderMarkdown(src, link, slugOf) {
       const o0 = orderedRange(src, a, b);
       if (o0 !== null) {
         const start = Number(o0.num);
-        const il = [];
-        const ib = [];
-        let p = a;
-        let e = b;
-        let nx = next;
-        while (true) {
+        const r = listBlock(src, a, b, next, n, link, start !== 1 ? `<ol start="${start}">\n` : '<ol>\n', '</ol>\n', (p, e) => {
           const o = orderedRange(src, p, e);
-          if (o !== null) {
-            ib.push(il.length);
-            il.push(o.text, e);
-            p = nx;
-            if (p >= n) break;
-            e = (_le = src.indexOf('\n', p)) === -1 ? n : _le;
-            nx = e === n ? n + 1 : e + 1;
-          } else if (isContinuedRange(src, p, e)) {
-            il.push(p, e);
-            p = nx;
-            if (p >= n) break;
-            e = (_le = src.indexOf('\n', p)) === -1 ? n : _le;
-            nx = e === n ? n + 1 : e + 1;
-          } else break;
-        }
-        ib.push(il.length);
-        parts.push(start !== 1 ? `<ol start="${start}">\n` : '<ol>\n');
-        for (let k = 0; k + 1 < ib.length; k++) {
-          const s0 = ib[k];
-          const s1 = ib[k + 1];
-          let html;
-          if (s1 - s0 === 2 && !(il[s0] !== il[s0 + 1] && (src[il[s0]] === ' ' || src[il[s0]] === '\t' || src[il[s0 + 1] - 1] === ' ' || src[il[s0 + 1] - 1] === '\t'))) {
-            html = inlineRange(src, il[s0], il[s0 + 1], link);
-          } else {
-            const strs = [];
-            for (let q = s0; q < s1; q += 2) {
-              let tx = il[q];
-              let ty = il[q + 1];
-              while (tx < ty && (src[tx] === ' ' || src[tx] === '\t')) tx++;
-              while (ty > tx && (src[ty - 1] === ' ' || src[ty - 1] === '\t')) ty--;
-              strs.push(src.slice(tx, ty));
-            }
-            html = inlineStr(strs.join('\n'), link);
-          }
-          parts.push('<li>' + html + '</li>\n');
-        }
-        parts.push('</ol>\n');
-        pos = p;
+          return o === null ? -1 : o.text;
+        });
+        parts.push(r.html);
+        pos = r.pos;
         continue;
       }
     } else if (c0 === 32 || c0 === 9) {
@@ -937,13 +915,11 @@ function genNodes(nodes, sc, out, nextId, tpl, loops) {
     } else if (n.kind === 'var' || n.kind === 'raw') {
       const v = `_v${nextId()}`;
       out.push(`var ${v}=${genPath(n.path, sc)};`);
-      // Numbers and booleans stringify to text without escapables, so
-      // they skip the escape call; strings go through esc, arrays
-      // through txt (the only helper left) and then esc for {{ }}.
-      // Strings are the common value, so they are tested first.
-      const val = `typeof ${v}==="string"?${v}:${v}==null?"":typeof ${v}==="number"?String(${v}):typeof ${v}==="boolean"?(${v}?"true":"false"):Array.isArray(${v})?${v}.map(txt).join(", "):""`;
-      if (n.kind === 'var') out.push(`s+=(typeof ${v}==="string"?esc(${v}):${v}==null?"":typeof ${v}==="number"?String(${v}):typeof ${v}==="boolean"?(${v}?"true":"false"):Array.isArray(${v})?esc(${v}.map(txt).join(", ")):"");`);
-      else out.push(`s+=(${val});`);
+      // txt() stringifies exactly as the inlined chain did (string as
+      // is, number/boolean to text, array joined after mapping txt,
+      // anything else ""), so {{ }} is esc(txt(v)) and {{{ }}} txt(v).
+      if (n.kind === 'var') out.push(`s+=esc(txt(${v}));`);
+      else out.push(`s+=txt(${v});`);
     } else if (n.kind === 'if') {
       const cond = genTruth(n.path, sc, n.not);
       const thenB = [];
